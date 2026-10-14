@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Tłumacz PL EN RU</string>
+    <string name="accessibility_description">Opcjonalny pływający przycisk. Po dotknięciu odczytuje tekst z aktualnego ekranu i pozwala wyraźnie zatwierdzić wysłanie go do ChatGPT w celu tłumaczenia. Nie działa automatycznie i nie zbiera haseł.</string>
+</resources>
