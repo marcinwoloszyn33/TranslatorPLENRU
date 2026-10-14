@@ -1,0 +1,49 @@
+
+name: Translator PL EN RU - build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  android-apk:
+    name: Zbuduj instalator Android
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Pobierz kod aplikacji
+        uses: actions/checkout@v4
+
+      - name: Przygotuj Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Przygotuj Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Zainstaluj Android SDK 35
+        run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Przygotuj Gradle 8.9
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.9'
+          cache-provider: basic
+
+      - name: Skompiluj APK debug
+        run: gradle --no-daemon :app:assembleDebug --stacktrace
+
+      - name: Udostepnij APK do pobrania
+        uses: actions/upload-artifact@v4
+        with:
+          name: Translator-PL-EN-RU-APK-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
