@@ -41,8 +41,8 @@ class MainActivity : Activity() {
         window.statusBarColor = Color.rgb(19, 39, 70)
         window.navigationBarColor = Color.rgb(246, 249, 252)
         render()
-        receiveIntent(intent)
         updateConnection()
+        receiveIntent(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -61,6 +61,7 @@ class MainActivity : Activity() {
         if (!incoming.isNullOrBlank()) {
             input.setText(incoming)
             input.setSelection(input.length())
+            output.text = "" // nie pokazuj tłumaczenia z poprzedniego tekstu
             status.text = "Tekst odebrany z innej aplikacji. Dotknij «Tłumacz»."
         }
         processText = intent.action == Intent.ACTION_PROCESS_TEXT
@@ -171,8 +172,10 @@ class MainActivity : Activity() {
     }
 
     private fun connect() {
+        connectButton.isEnabled = false
         status.text = "Otwieram bezpieczne logowanie w przeglądarce…"
         client.beginSignIn(this) { result ->
+            connectButton.isEnabled = true
             result.onSuccess { updateConnection(); Toast.makeText(this, "Konto ChatGPT połączone", Toast.LENGTH_LONG).show() }
                 .onFailure { status.text = "Logowanie nieudane: ${it.message}" }
         }
@@ -189,6 +192,7 @@ class MainActivity : Activity() {
         if (from == to) { status.text = "Wybierz różne języki."; return }
         settings.edit().putInt("source_idx", source.selectedItemPosition).apply()
         busy = true; translateButton.isEnabled = false
+        output.text = "" // stary wynik nie może zostać przypadkiem skopiowany
         status.text = "Trwa tłumaczenie…"
         Thread {
             val result = runCatching { client.translate(original, from, to, mode) }

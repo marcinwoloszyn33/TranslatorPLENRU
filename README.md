@@ -55,3 +55,13 @@ Kod przykładowy w tym archiwum udostępniony na zasadach MIT — plik `LICENSE`
 ## Kompilacja w GitHub Actions
 
 Wersja GitHub-ready zawiera `.github/workflows/build-apk.yml`. Instrukcje w pliku `GITHUB_INSTRUKCJA.md`.
+
+## Audyt 0.3 (2026-10-14)
+
+- Trwałe zachowanie `client_id` po rejestracji SIWC także wtedy, gdy wymiana kodu OAuth na token nie powiedzie się.
+- Aplikacja nie pokazuje już „połączono” jedynie na podstawie nadanego `client_id`; wymagany jest token i udzielony zakres `chatgpt.tokens.use.direct`.
+- Weryfikacja niespodziewanego `client_id` w powracającym OAuth i znacznika `nbf` w ID tokenie.
+- Czytelniejsze komunikaty limitów i błędów odpowiedzi strumieniowych.
+- Wyczyszczenie poprzedniego tłumaczenia podczas nowego zlecenia i po odebraniu tekstu z innej aplikacji; blokada wielokrotnego równoczesnego rozpoczynania logowania.
+
+Nie udało się jeszcze przetestować rzeczywistego logowania na telefonie. Debug APK jest podpisywany kluczem generowanym na runnerze GitHub Actions, więc aktualizacja wcześniej zainstalowanego testowego APK może wymagać jego odinstalowania.
