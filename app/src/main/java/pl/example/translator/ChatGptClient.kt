@@ -15,6 +15,7 @@ import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.SocketTimeoutException
+import java.net.SocketException
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.security.KeyFactory
@@ -35,10 +36,14 @@ class ChatGptClient(context: Context) {
         // Token refresh is single-use/rotating. Both MainActivity and the floating
         // accessibility service may construct separate ChatGptClient instances.
         private val tokenRefreshLock = Any()
+        private val authFinishLock = Any()
+        @Volatile private var activeListener: ServerSocket? = null
     }
 
     private val appContext = context.applicationContext
     private val store = SecureStore(appContext)
+    // Separate Keystore-protected record so PKCE, nonce and state survive an Android process restart.
+    private val pendingStore = SecureStore(appContext, "secure_pending_signin_v1", "translator_pending_signin_v1")
     private val prefs = appContext.getSharedPreferences("translator_settings", Context.MODE_PRIVATE)
     private val random = SecureRandom()
     private val resource = "https://api.openai.com/v1"
@@ -61,6 +66,9 @@ class ChatGptClient(context: Context) {
     fun email(): String = store.load()?.optString("email") ?: ""
     fun signOut() { store.clear() } // To revoke remotely, disconnect in ChatGPT Settings.
 
+    /** OAuth listener is alive while the foreground notification is visible.
+     * A manual callback fallback is offered if an OEM browser blocks loopback traffic.
+     */
     fun beginSignIn(activity: Activity, onResult: (Result<String>) -> Unit) {
         val saved = store.load()
         val issuedClient = saved?.optString("client_id").orEmpty()
@@ -70,11 +78,23 @@ class ChatGptClient(context: Context) {
         val nonce = randomUrlSafe(24)
         val verifier = randomUrlSafe(48)
         val challenge = base64Url(MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray(StandardCharsets.UTF_8)))
-        val listener = try { ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")) } catch (e: Exception) {
+        val listener = try { ServerSocket(0, 4, InetAddress.getByName("127.0.0.1")) } catch (e: Exception) {
             onResult(Result.failure(e)); return
         }
-        listener.soTimeout = 240_000
+        listener.soTimeout = 900_000 // fifteen minutes rather than four
         val redirect = "http://127.0.0.1:${listener.localPort}/auth/callback"
+        val pending = JSONObject()
+            .put("issued_client", issuedClient)
+            .put("first_time", firstTime)
+            .put("state", state)
+            .put("nonce", nonce)
+            .put("verifier", verifier)
+            .put("redirect", redirect)
+            .put("started_at", System.currentTimeMillis())
+        pendingStore.save(pending)
+        activeListener?.close()
+        activeListener = listener
+
         val builder = Uri.parse(authorizeUrl).buildUpon()
             .appendQueryParameter("response_type", "code")
             .appendQueryParameter("client_id", clientId)
@@ -91,74 +111,137 @@ class ChatGptClient(context: Context) {
             saved?.optString("id_token")?.takeIf { it.isNotBlank() }?.let { builder.appendQueryParameter("id_token_hint", it) }
             saved?.optString("email")?.takeIf { it.isNotBlank() }?.let { builder.appendQueryParameter("login_hint", it) }
         }
+
+        try {
+            keepSignInAlive(activity)
+        } catch (e: Exception) {
+            listener.close()
+            pendingStore.clear()
+            onResult(Result.failure(IllegalStateException("Nie można uruchomić usługi logowania: ${e.message}")))
+            return
+        }
         Thread {
             try {
                 listener.use { server ->
-                    server.accept().use { socket ->
-                        socket.soTimeout = 10000
-                        val reader = BufferedReader(InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8))
-                        val firstLine = reader.readLine() ?: error("Brak odpowiedzi przeglądarki.")
-                        while (true) { val header = reader.readLine() ?: break; if (header.isBlank()) break }
-                        val path = firstLine.split(" ").getOrNull(1) ?: error("Nieprawidłowe żądanie.")
-                        val callback = Uri.parse("http://127.0.0.1$path")
-                        if (!firstLine.startsWith("GET ") || callback.path != "/auth/callback")
-                            error("Nieprawidłowy adres powrotny.")
-                        if (callback.getQueryParameter("state") != state) error("Błąd weryfikacji OAuth state.")
-                        val returnedError = callback.getQueryParameter("error")
-                        if (returnedError != null) {
-                            sendBrowserResponse(socket, "Autoryzacja przerwana. Możesz zamknąć kartę.")
-                            error("Odmówiono autoryzacji: $returnedError")
+                    while (!server.isClosed) {
+                        server.accept().use { socket ->
+                            socket.soTimeout = 10_000
+                            val reader = BufferedReader(InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8))
+                            val firstLine = reader.readLine()
+                            if (firstLine != null) {
+                                // A browser may probe the listener before the actual OAuth callback.
+                                while (true) { val header = reader.readLine() ?: break; if (header.isBlank()) break }
+                                val path = firstLine.split(" ").getOrNull(1).orEmpty()
+                                val callback = Uri.parse("http://127.0.0.1$path")
+                                if (!firstLine.startsWith("GET ") || callback.path != "/auth/callback") {
+                                    sendBrowserResponse(socket, "Nieprawidłowa ścieżka powrotna.")
+                                } else if (callback.getQueryParameter("state") != state) {
+                                    sendBrowserResponse(socket, "Nieprawidłowy identyfikator próby logowania.")
+                                } else {
+                                    sendBrowserResponse(socket, "Potwierdzenie odebrane. Wróć do translatora.")
+                                    val result = runCatching { finishCallback(callback) }
+                                    activity.runOnUiThread { onResult(result) }
+                                    return@Thread
+                                }
+                            }
                         }
-                        val authCode = callback.getQueryParameter("code") ?: error("Brak kodu autoryzacji.")
-                        val callbackClient = callback.getQueryParameter("client_id")
-                        val actualClient = if (firstTime) callbackClient
-                            ?: error("Brak client_id po rejestracji.") else issuedClient
-                        if (!actualClient.startsWith("oaiapp_")) error("Nieprawidłowy client_id.")
-                        if (!firstTime && callbackClient != null && callbackClient != issuedClient)
-                            error("Identyfikator klienta nie odpowiada bieżącej rejestracji.")
-                        // Wydany client_id musi przetrwać błędy wymiany kodu lub sieci.
-                        // Nie oznacza to jeszcze zalogowania do aplikacji.
-                        if (firstTime) store.save(JSONObject().put("client_id", actualClient))
-                        sendBrowserResponse(socket, "Powrót z logowania odebrany. Sprawdź wynik w aplikacji.")
-                        val tokens = postForm(tokenUrl, mapOf(
-                            "grant_type" to "authorization_code",
-                            "client_id" to actualClient,
-                            "code" to authCode,
-                            "code_verifier" to verifier,
-                            "redirect_uri" to redirect,
-                            "resource" to resource
-                        ))
-                        val idToken = tokens.optString("id_token")
-                        if (idToken.isBlank()) error("Brak tokenu tożsamości.")
-                        val identity = verifyIdToken(idToken, actualClient, nonce)
-                        if (saved != null && saved.optString("subject").isNotEmpty() &&
-                            saved.optString("subject") != identity.getString("sub")) error("Wybrano inne konto; rozłącz dotychczasowe konto przed zmianą.")
-                        val scopes = tokens.optString("scope").split(" ")
-                        if (!scopes.contains("chatgpt.tokens.use.direct")) error("Brak zgody na korzystanie z planu ChatGPT.")
-                        if (tokens.optString("access_token").isBlank()) error("Brak tokenu dostępu.")
-                        val record = JSONObject()
-                            .put("client_id", actualClient)
-                            .put("subject", identity.getString("sub"))
-                            .put("email", identity.optString("email"))
-                            .put("id_token", idToken)
-                            .put("access_token", tokens.getString("access_token"))
-                            .put("refresh_token", tokens.optString("refresh_token"))
-                            .put("scope", tokens.getString("scope"))
-                            .put("expires_at", System.currentTimeMillis() + tokens.optLong("expires_in", 3600L) * 1000L)
-                        store.save(record)
-                        activity.runOnUiThread { onResult(Result.success(record.optString("email", "połączono"))) }
                     }
                 }
-            } catch (e: SocketTimeoutException) {
-                activity.runOnUiThread { onResult(Result.failure(IllegalStateException("Logowanie przekroczyło limit czasu."))) }
+            } catch (_: SocketTimeoutException) {
+                activity.runOnUiThread {
+                    onResult(Result.failure(IllegalStateException("Minęło 15 minut. Rozpocznij logowanie ponownie.")))
+                }
             } catch (e: Exception) {
-                activity.runOnUiThread { onResult(Result.failure(e)) }
+                // Closing a listener on successful/manual completion is expected.
+                if (pendingStore.load() != null && !listener.isClosed) {
+                    activity.runOnUiThread { onResult(Result.failure(e)) }
+                }
+            } finally {
+                if (activeListener === listener) {
+                    activeListener = null
+                    // Keep the encrypted PKCE transaction for manual recovery until it expires.
+                    stopSignInService()
+                }
             }
         }.start()
-        try { activity.startActivity(Intent(Intent.ACTION_VIEW, builder.build()).addCategory(Intent.CATEGORY_BROWSABLE)) }
-        catch (e: Exception) { listener.close(); onResult(Result.failure(e)) }
+
+        try {
+            activity.startActivity(Intent(Intent.ACTION_VIEW, builder.build()).addCategory(Intent.CATEGORY_BROWSABLE))
+        } catch (e: Exception) {
+            listener.close()
+            stopSignInService()
+            onResult(Result.failure(e))
+        }
     }
 
+    /** User-controlled fallback: paste the complete local callback URL into the app, never into chat. */
+    fun completeFromCallbackUrl(url: String, onResult: (Result<String>) -> Unit) {
+        Thread {
+            val result = runCatching { finishCallback(Uri.parse(url.trim())) }
+            android.os.Handler(android.os.Looper.getMainLooper()).post { onResult(result) }
+        }.start()
+    }
+
+    private fun finishCallback(callback: Uri): String = synchronized(authFinishLock) {
+        val pending = pendingStore.load() ?: error("Brak rozpoczętego logowania. Dotknij «Połącz z ChatGPT» jeszcze raz.")
+        val expected = Uri.parse(pending.getString("redirect"))
+        if (System.currentTimeMillis() - pending.optLong("started_at") > 900_000) {
+            pendingStore.clear()
+            error("Kod logowania mógł wygasnąć. Rozpocznij nowe logowanie.")
+        }
+        if (callback.scheme != expected.scheme || callback.host != expected.host ||
+            callback.port != expected.port || callback.path != expected.path ||
+            callback.userInfo != null) error("Adres powrotny nie odpowiada aktualnej próbie logowania.")
+        if (callback.getQueryParameter("state") != pending.optString("state")) error("Nieprawidłowy OAuth state.")
+        callback.getQueryParameter("error")?.let { error("Odmówiono autoryzacji: $it") }
+        val code = callback.getQueryParameter("code") ?: error("Brak kodu autoryzacji.")
+        val issuedClient = pending.optString("issued_client")
+        val firstTime = pending.optBoolean("first_time")
+        val callbackClient = callback.getQueryParameter("client_id")
+        val actualClient = if (firstTime) callbackClient ?: error("Brak identyfikatora klienta.") else issuedClient
+        if (!actualClient.startsWith("oaiapp_")) error("Nieprawidłowy client_id.")
+        if (!firstTime && callbackClient != null && callbackClient != issuedClient) error("Niezgodny client_id.")
+        if (firstTime) store.save(JSONObject().put("client_id", actualClient))
+        val tokens = postForm(tokenUrl, mapOf(
+            "grant_type" to "authorization_code", "client_id" to actualClient,
+            "code" to code, "code_verifier" to pending.getString("verifier"),
+            "redirect_uri" to pending.getString("redirect"), "resource" to resource
+        ))
+        val idToken = tokens.optString("id_token")
+        if (idToken.isBlank()) error("Brak tokenu tożsamości.")
+        val identity = verifyIdToken(idToken, actualClient, pending.getString("nonce"))
+        val old = store.load()
+        if (old != null && old.optString("subject").isNotEmpty() &&
+            old.optString("subject") != identity.getString("sub")) error("Wybrano inne konto. Najpierw rozłącz poprzednie.")
+        if (!tokens.optString("scope").split(" ").contains("chatgpt.tokens.use.direct"))
+            error("Brak zgody na korzystanie z planu ChatGPT.")
+        if (tokens.optString("access_token").isBlank()) error("Brak tokenu dostępu.")
+        val record = JSONObject()
+            .put("client_id", actualClient)
+            .put("subject", identity.getString("sub"))
+            .put("email", identity.optString("email"))
+            .put("id_token", idToken)
+            .put("access_token", tokens.getString("access_token"))
+            .put("refresh_token", tokens.optString("refresh_token"))
+            .put("scope", tokens.getString("scope"))
+            .put("expires_at", System.currentTimeMillis() + tokens.optLong("expires_in", 3600L) * 1000L)
+        store.save(record)
+        pendingStore.clear()
+        activeListener?.close()
+        activeListener = null
+        stopSignInService()
+        record.optString("email", "połączono")
+    }
+
+    private fun keepSignInAlive(activity: Activity) {
+        val intent = Intent(activity, LoginKeepAliveService::class.java)
+        if (android.os.Build.VERSION.SDK_INT >= 26) activity.startForegroundService(intent)
+        else activity.startService(intent)
+    }
+
+    private fun stopSignInService() {
+        appContext.stopService(Intent(appContext, LoginKeepAliveService::class.java))
+    }
     private fun sendBrowserResponse(socket: java.net.Socket, message: String) {
         val html = "<!doctype html><html lang='pl'><meta charset='utf-8'><title>Translator</title><body><h2>${message}</h2></body></html>"
         val body = html.toByteArray(StandardCharsets.UTF_8)

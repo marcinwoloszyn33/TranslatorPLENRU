@@ -81,6 +81,8 @@ class MainActivity : Activity() {
 
         connectButton = button("Połącz z ChatGPT") { connect() }
         page.addView(connectButton.spaced(0, 0, 0, 8))
+        page.addView(button("Nie można połączyć? Dokończ logowanie z adresu") { finishLoginManually() }
+            .spaced(0, 0, 0, 8))
         page.addView(button("Rozłącz konto (tylko na tym urządzeniu)") {
             AlertDialog.Builder(this).setMessage("Usunąć lokalne tokeny dostępu? Uprawnienie aplikacji możesz również cofnąć w ustawieniach ChatGPT.")
                 .setNegativeButton("Anuluj", null)
@@ -179,6 +181,34 @@ class MainActivity : Activity() {
             result.onSuccess { updateConnection(); Toast.makeText(this, "Konto ChatGPT połączone", Toast.LENGTH_LONG).show() }
                 .onFailure { status.text = "Logowanie nieudane: ${it.message}" }
         }
+    }
+
+    private fun finishLoginManually() {
+        val edit = EditText(this).apply {
+            hint = "http://127.0.0.1:.../auth/callback?..."
+            minLines = 2
+            maxLines = 4
+            setSingleLine(false)
+        }
+        // Clipboard is read only after the user taps this explicit recovery button.
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val copied = clipboard.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
+        if (copied.startsWith("http://127.0.0.1:")) edit.setText(copied)
+        AlertDialog.Builder(this)
+            .setTitle("Awaryjne dokończenie logowania")
+            .setMessage("Skopiuj cały adres 127.0.0.1 z paska przeglądarki i wklej tutaj. Nie wysyłaj go nikomu — zawiera jednorazowy kod. Działa tylko dla bieżącej próby logowania, do 15 minut.")
+            .setView(edit)
+            .setNegativeButton("Anuluj", null)
+            .setPositiveButton("Dokończ") { _, _ ->
+                val url = edit.text.toString()
+                status.text = "Sprawdzam potwierdzenie logowania…"
+                client.completeFromCallbackUrl(url) { result ->
+                    result.onSuccess {
+                        updateConnection()
+                        Toast.makeText(this, "Połączono konto ChatGPT", Toast.LENGTH_LONG).show()
+                    }.onFailure { status.text = "Logowanie nieudane: ${it.message}" }
+                }
+            }.show()
     }
 
     private fun translateNow() {

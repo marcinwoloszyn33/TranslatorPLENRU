@@ -1,3 +1,13 @@
+# Poprawka 0.4 — logowanie Android / 127.0.0.1
+
+- Nasłuchiwanie lokalnego powrotu trwa do 15 minut zamiast 4.
+- Krótka usługa pierwszoplanowa z powiadomieniem podtrzymuje proces przy otwartej przeglądarce (po zakończeniu logowania jest zatrzymywana).
+- Stan OAuth, nonce i weryfikator PKCE są zabezpieczone Android Keystore do czasu ukończenia logowania lub wygaśnięcia próby.
+- Gdy przeglądarka pokazuje błąd 127.0.0.1, skopiuj pełny adres z paska i w aplikacji kliknij „Nie można połączyć? Dokończ logowanie z adresu”. Kod zostanie wykorzystany lokalnie; **nie wysyłaj adresu ani kodu do czatu**.
+- Z poprzedniego nieudanego logowania nie wykorzystuj starego kodu. Uruchom nową próbę w wersji 0.4.
+- Aktualizacja debug APK z GitHub Actions może wymagać odinstalowania wersji 0.3 ze względu na zmienny podpis. Utracisz lokalne dane aplikacji. Zalecane ADB, jeżeli menedżer instalacji odrzuca APK.
+- Kompilacja 0.4 nie była jeszcze uruchomiona — wyniki należy zweryfikować w GitHub Actions, a logowanie sprawdzić na RMX2193.
+
 # Translator PL / EN / RU — prototyp Android (RMX2193)
 
 Stan: **kod źródłowy prototypu 0.1.0, nieprzetestowany na fizycznym telefonie**.

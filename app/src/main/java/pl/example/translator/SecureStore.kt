@@ -13,9 +13,12 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /** Local token storage. AES/GCM key never leaves Android Keystore. */
-class SecureStore(context: Context) {
-    private val prefs = context.getSharedPreferences("secure_session_v1", Context.MODE_PRIVATE)
-    private val alias = "translator_token_storage_v1"
+class SecureStore(
+    context: Context,
+    preferencesName: String = "secure_session_v1",
+    private val alias: String = "translator_token_storage_v1"
+) {
+    private val prefs = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
 
     private fun key(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
